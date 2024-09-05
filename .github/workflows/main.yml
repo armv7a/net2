@@ -1,0 +1,119 @@
+name: Daily File Download and Processing
+
+on:
+  schedule:
+    - cron: '0 4 * * *' # 每天中午12点（UTC时间）
+  workflow_dispatch: # 手动触发
+
+jobs:
+  download_and_process:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v2
+
+    - name: Create files directory
+      run: mkdir -p files
+
+    - name: Download file 1.json
+      run: curl -o 1.json -L "https://gitee.com/api/v5/repos/crosserr/share/contents/encryptcfg5?access_token=856ec1e2613d8c17d7912f538321418c&ref=hotfix"
+
+    - name: Download file 2.json
+      run: curl -o 2.json -L "https://gitee.com/api/v5/repos/c0nfigway/share/contents/encryptcfg5?access_token=40c9d0c63121b9c3ff04a49e6a31d986&ref=hotfix"
+
+    - name: Extract content from JSON files
+      run: |
+        cat 1.json | jq -r '.content' > files/1.txt
+        cat 2.json | jq -r '.content' > files/2.txt
+
+    - name: Check if required files exist and compare them
+      id: check_files
+      run: |
+        # Check if required files exist
+        if [ ! -f "files/1.txt" ] || [ ! -f "files/2.txt" ]; then
+          echo "One or more required files are missing."
+          echo "files_are_identical=false" >> $GITHUB_ENV
+          exit 0
+        fi
+
+        # Check if temporary files exist
+        if [ ! -f "files/1_tmp.txt" ] || [ ! -f "files/2_tmp.txt" ]; then
+          echo "Temporary files do not exist. Setting files_are_identical to false."
+          echo "files_are_identical=false" >> $GITHUB_ENV
+          exit 0
+        fi
+
+        # Compare files using cmp
+        if cmp -s "files/1.txt" "files/1_tmp.txt" && cmp -s "files/2.txt" "files/2_tmp.txt"; then
+          echo "Files are the same, setting output variable."
+          echo "files_are_identical=true" >> $GITHUB_ENV
+        else
+          echo "Files are different, setting output variable."
+          echo "files_are_identical=false" >> $GITHUB_ENV
+        fi
+
+    - name: Base64 decode and AES decrypt files
+      if: env.files_are_identical == 'false'
+      run: |
+        DECODED_FILE1=$(cat files/1.txt | base64 --decode)
+        DECODED_FILE2=$(cat files/2.txt | base64 --decode)
+
+        echo "$DECODED_FILE1" > decoded_1.bin
+        echo "$DECODED_FILE2" > decoded_2.bin
+
+        sudo apt update
+        sudo apt install -y nodejs npm
+        sudo npm install crypto-js
+
+        # 1.js content
+        node -e "
+        const CryptoJS = require('crypto-js');
+        const fs = require('fs');
+        const encryptedBase64 = fs.readFileSync('decoded_1.bin', 'utf8');
+        const key = CryptoJS.enc.Utf8.parse('8YfiQ8wrkziZ5YFa');
+        const iv = CryptoJS.enc.Utf8.parse('168169');
+        const decrypted = CryptoJS.AES.decrypt(
+          { ciphertext: CryptoJS.enc.Base64.parse(encryptedBase64) },
+          key,
+          { iv: iv, mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7 }
+        );
+        const decryptedText = decrypted.toString(CryptoJS.enc.Utf8);
+        fs.writeFileSync('files/decrypted_1.txt', decryptedText, 'utf8');
+        console.log('解密后的内容已保存到 files/decrypted_1.txt');
+        "
+
+        # 2.js content
+        node -e "
+        const CryptoJS = require('crypto-js');
+        const fs = require('fs');
+        const encryptedBase64 = fs.readFileSync('decoded_2.bin', 'utf8');
+        const key = CryptoJS.enc.Utf8.parse('8YfiQ8wrkziZ5YFa');
+        const iv = CryptoJS.enc.Utf8.parse('168169');
+        const decrypted = CryptoJS.AES.decrypt(
+          { ciphertext: CryptoJS.enc.Base64.parse(encryptedBase64) },
+          key,
+          { iv: iv, mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7 }
+        );
+        const decryptedText = decrypted.toString(CryptoJS.enc.Utf8);
+        fs.writeFileSync('files/decrypted_2.txt', decryptedText, 'utf8');
+        console.log('解密后的内容已保存到 files/decrypted_2.txt');
+        "
+
+    - name: Combine decrypted files into main.txt
+      if: env.files_are_identical == 'false'
+      run: cat files/decrypted_1.txt > main.txt
+
+    - name: Update temporary files for comparison
+      if: env.files_are_identical == 'false'
+      run: |
+        cp files/1.txt files/1_tmp.txt
+
+    - name: Commit and push changes
+      if: env.files_are_identical == 'false'
+      run: |
+        git config --global user.name "GitHub Actions"
+        git config --global user.email "actions@github.com"
+        git add files/1.txt files/1_tmp.txt main.txt
+        git commit -m "Update files"
+        git push
